@@ -1,0 +1,1206 @@
+<html>
+<head>
+<title>Project 4 -- network file server</title>
+</head>
+<body>
+<div id="primer-spec-plugin-main-content">
+<h1>Project 4 -- network file server</h1>
+Worth: 15 points<br>
+Assigned: March 24, 2022<br>
+Due: April 18, 2022
+
+<h2 id="overview">1. Overview</h2>
+
+<p>
+In this project, you will implement a multi-threaded network file
+server.  Clients that use your file server will interact with it
+via network messages.  This project will help you understand hierarchical
+file systems, socket programming, client-server systems, and network
+protocols, and it will give you experience building a substantial
+multi-threaded program.
+
+<!--
+<h2 id="hierarchy">2. Hierarchical file system</h2>
+-->
+
+<p>
+Your file server will provide a hierarchical file system.  Files and
+directories stored on the file server are referred to by a full pathname,
+with <tt>/</tt> being the delimiting character.
+For example, the pathname <tt>/class/482/notes</tt> refers to a file
+<tt>notes</tt> that is stored in the directory <tt>/class/482</tt>.
+Pathnames must start with <tt>/</tt>, and they must not end with <tt>/</tt>.
+
+<p>
+Directories store files and/or sub-directories; files store data.
+Each file and directory is owned by a particular user, except for the root
+directory <tt>/</tt>, which is owned by all users.  Users may only access
+files and directories they own.
+
+<h2 id="interface">2. Client interface to the file server</h2>
+
+<p>
+After initializing the library (by calling <tt>fs_clientinit</tt>), a
+client uses the following functions to issue requests to your file server:
+<tt>fs_readblock</tt>, <tt>fs_writeblock</tt>, <tt>fs_create</tt>,
+<tt>fs_delete</tt>.  These functions are described in <a
+href=fs_client.h><tt>fs_client.h</tt></a> and included in <a
+href=libfs_client.o><tt>libfs_client.o</tt></a>.  Each client program
+should include <a href=fs_client.h><tt>fs_client.h</tt></a> and link with
+<a href=libfs_client.o><tt>libfs_client.o</tt></a>.
+
+<p>
+Here is an example client that uses these functions.  Assume the file
+system is initially empty.  This client is run with two arguments:
+<ol>
+<li>the name of the file server's computer
+<li>the port on which the file server process is accepting connections from
+clients.
+</ol>
+
+<hr>
+<pre>
+#include &lt;iostream&gt;
+#include &lt;cassert&gt;
+#include &lt;cstdlib&gt;
+#include "fs_client.h"
+
+using std::cout;
+
+int main(int argc, char *argv[]) {
+    char *server;
+    int server_port;
+
+    const char *writedata = "We hold these truths to be self-evident, that all men are created equal, that they are endowed by their Creator with certain unalienable Rights, that among these are Life, Liberty and the pursuit of Happiness. -- That to secure these rights, Governments are instituted among Men, deriving their just powers from the consent of the governed, -- That whenever any Form of Government becomes destructive of these ends, it is the Right of the People to alter or to abolish it, and to institute new Government, laying its foundation on such principles and organizing its powers in such form, as to them shall seem most likely to effect their Safety and Happiness.";
+
+    char readdata[FS_BLOCKSIZE];
+    int status;
+
+    if (argc != 3) {
+        cout << "error: usage: " << argv[0] << " &lt;server&gt; &lt;serverPort&gt;\n";
+        exit(1);
+    }
+    server = argv[1];
+    server_port = atoi(argv[2]);
+
+    fs_clientinit(server, server_port);
+
+    status = fs_create("user1", "/dir", 'd');
+    assert(!status);
+
+    status = fs_create("user1", "/dir/file", 'f');
+    assert(!status);
+
+    status = fs_writeblock("user1", "/dir/file", 0, writedata);
+    assert(!status);
+
+    status = fs_readblock("user1", "/dir/file", 0, readdata);
+    assert(!status);
+
+    status = fs_delete("user1", "/dir/file");
+    assert(!status);
+
+    status = fs_delete("user1", "/dir");
+    assert(!status);
+}
+</pre>
+<hr>
+
+<h2 id="protocol">3. Communication protocol between client and file server</h2>
+
+<p>
+This section describes the request and response messages used to communicate between
+clients and the file server.  The client's side of this protocol is carried
+out by the functions in <a href=libfs_client.o><tt>libfs_client.o</tt></a>.
+You will write code in your file server to carry out the file server's side
+of the protocol.
+
+<p>
+There are four types of requests that can be sent over the network from a
+client to the file server: <tt>FS_READBLOCK</tt>, <tt>FS_WRITEBLOCK</tt>,
+<tt>FS_CREATE</tt>, <tt>FS_DELETE</tt>.  Each client request causes the
+client library to open a connection to the server, send the request,
+receive the response from the server, and close its side of the connection.
+
+<p>
+After responding to a client's request, the server should close its side of
+the connection.  If the file server receives a client request that causes
+an error, it should close its side of the connection <strong>without sending a
+response message</strong>, then continue processing other requests.
+
+<p>
+<a href="#FS_READBLOCK">Section 3.1-3.4</a> describe the format of each
+client request message and the server's response message.  Correct requests
+will follow the specified format exactly, e.g., no extra spaces, all fields non-empty, numbers
+in canonical base-10 form with no leading zeroes.
+
+<p>
+Since clients are untrusted, your file server should be careful in how it
+handles network input (processing requests from untrusted sources is an
+important aspect of writing operating systems).  Your file server must
+continue correct operation regardless of what input it receives from
+clients.  Avoid making assumptions about the content and size of the
+requests until you have verified those assumptions.
+
+<p>
+While your file server must handle client requests correctly, the specified
+communication protocol does not guarantee that requests and responses are
+authentic, confidential, or fresh, nor does it permit file servers to
+defend against denial-of-service attacks (e.g., clients that open
+connections but never send complete requests).  The given protocol
+could be layered on top of a secure communication protocol (e.g., <a
+href="https://en.wikipedia.org/wiki/Transport_Layer_Security">TLS</a>) to
+help provide these guarantees, but this is outside the scope of our class.
+
+<h3 id="FS_READBLOCK">3.1 <tt>FS_READBLOCK</tt></h3>
+
+<p>
+A client reads a block of an existing file by sending an
+<tt>FS_READBLOCK</tt> request to the file server.
+
+<p>
+An <tt>FS_READBLOCK</tt> request message is a C string of the following format:
+
+<pre>
+FS_READBLOCK &lt;username&gt; &lt;pathname&gt; &lt;block&gt;&lt;NULL&gt;
+</pre>
+
+<ul>
+<li><tt>&lt;username&gt;</tt> is the name of the user making the request
+<li><tt>&lt;pathname&gt;</tt> is the name of the file being read
+<li><tt>&lt;block&gt;</tt> specifies which block of the file to read
+<li><tt>&lt;NULL&gt;</tt> is the ASCII character '\0' (terminating the string)
+</ul>
+
+<p>
+Upon receiving an <tt>FS_READBLOCK</tt> request, the file server should
+check if the request is valid.  If so, the file server should read the
+requested data from disk and return the data in the response message.  The
+response message for a successful <tt>FS_READBLOCK</tt> is the same as the
+request message, followed by the data that was read from the file (note
+that this data is outside of the response C string).
+
+<h3 id="FS_WRITEBLOCK">3.2 <tt>FS_WRITEBLOCK</tt></h3>
+
+<p>
+A client writes a block to an existing file by sending an
+<tt>FS_WRITEBLOCK</tt> request to the file server.
+
+<p>
+An <tt>FS_WRITEBLOCK</tt> request message is a C string (plus the data to be
+written) of the following format:
+
+<pre>
+FS_WRITEBLOCK &lt;username&gt; &lt;pathname&gt; &lt;block&gt;&lt;NULL&gt;&lt;data&gt;
+</pre>
+
+<ul>
+<li><tt>&lt;username&gt;</tt> is the name of the user making the request
+<li><tt>&lt;pathname&gt;</tt> is the name of the file to which the data is
+being written
+<li><tt>&lt;block&gt;</tt> specifies which block of the file to write.
+&lt;block&gt; may refer to an existing block in the file, or it may refer to
+the block immediately after the current end of the file (this is how files
+grow in size).
+<li><tt>&lt;NULL&gt;</tt> is the ASCII character '\0' (terminating the string)
+<li><tt>&lt;data&gt;</tt> is the data to write to the file.  Note that
+<tt>&lt;data&gt;</tt> is outside of the request string (i.e., after
+<tt>&lt;NULL&gt;</tt>).
+</ul>
+
+<p>
+Upon receiving an <tt>FS_WRITEBLOCK</tt> request, the file server should
+check if the request is valid and there is space on the disk and in the
+file.  If so, the file server should write the data to
+the file and respond to the client.  The response message for a successful
+<tt>FS_WRITEBLOCK</tt> is the C string portion of the request message (i.e.,
+the request message without the data being written to the file).
+
+<h3 id="FS_CREATE">3.3 <tt>FS_CREATE</tt></h3>
+
+<p>
+A client creates a new file or directory by sending an <tt>FS_CREATE</tt>
+request to the file server.
+
+<p>
+An <tt>FS_CREATE</tt> request message is a C string of the following format:
+
+<pre>
+FS_CREATE &lt;username&gt; &lt;pathname&gt; &lt;type&gt;&lt;NULL&gt;
+</pre>
+
+<ul>
+<li><tt>&lt;username&gt;</tt> is the name of the user making the request
+<li><tt>&lt;pathname&gt;</tt> is the name of the file or directory being created
+<li><tt>&lt;type&gt;</tt> can be 'f' (file) or 'd' (directory)
+<li><tt>&lt;NULL&gt;</tt> is the ASCII character '\0' (terminating the string)
+</ul>
+
+<p>
+Upon receiving an <tt>FS_CREATE</tt> request, the file server should check
+if the request is valid and there is space on the disk and in the
+directory.  If so, the file server should create the new file or directory.
+The response message for a successful <tt>FS_CREATE</tt> is the same
+as the request message.
+
+<h3 id="FS_DELETE">3.4 <tt>FS_DELETE</tt></h3>
+
+<p>
+A client deletes an existing file or empty directory by sending an
+<tt>FS_DELETE</tt> request to the file server.
+
+<p>
+An <tt>FS_DELETE</tt> request message is a C string of the following format:
+
+<pre>
+FS_DELETE &lt;username&gt; &lt;pathname&gt;&lt;NULL&gt;
+</pre>
+
+<ul>
+<li><tt>&lt;username&gt;</tt> is the name of the user making the request
+<li><tt>&lt;pathname&gt;</tt> is the name of the file or directory being deleted
+<li><tt>&lt;NULL&gt;</tt> is the ASCII character '\0' (terminating the string)
+</ul>
+
+<p>
+Upon receiving an <tt>FS_DELETE</tt> request, the file server should check
+if the request is valid.  A directory can only be deleted when it contains
+no files or sub-directories.  The root directory <tt>/</tt> cannot be
+deleted.  If the request is valid, the file server should
+delete the file or directory.
+
+<p>
+The response message for a successful <tt>FS_DELETE</tt> is the same
+as the request message.
+
+<h2 id="structure">4. File system structure on disk</h2>
+
+<p>
+This section describes the file system structure on disk that your file
+server will read and write.  <a href=fs_param.h><tt>fs_param.h</tt></a>
+(which is included automatically in both <a
+href=fs_client.h><tt>fs_client.h</tt></a> and <a
+href=fs_server.h><tt>fs_server.h</tt></a>) defines the basic file system
+parameters.
+
+<p>
+<a href=fs_server.h><tt>fs_server.h</tt></a> has two definitions that describe
+the on-disk data structures:
+
+<hr>
+<pre>
+/*
+ * Definitions for on-disk data structures.
+ */
+struct {
+    char name[FS_MAXFILENAME + 1];         // name of this file or directory
+    uint32_t inode_block;                  // disk block that stores the inode
+                                           // for this file or directory (0 if
+                                           // this direntry is unused)
+} fs_direntry;
+
+struct {
+    char type;                             // file ('f') or directory ('d')
+    char owner[FS_MAXUSERNAME + 1];        // owner of this file or directory
+    uint32_t size;                         // size of this file or directory
+                                           // in blocks
+    uint32_t blocks[FS_MAXFILEBLOCKS];     // array of data blocks for this
+                                           // file or directory
+} fs_inode;
+</pre>
+<hr>
+
+<p>
+Each file and directory is described by an inode, which is stored in a
+single disk block.  The structure of an inode is specified in
+<tt>fs_inode</tt>.  The <tt>type</tt> field specifies whether the inode
+refers to a file (type f) or directory (type d).  The <tt>owner</tt> field
+is the name of the user that created the file or directory.  It is a string of
+characters (whitespace characters are not allowed) that is terminated by a null character.  
+The root directory
+<tt>/</tt> is owned by all users, and its <tt>owner</tt> field is the empty
+string.  Files and directories may be read, written, and deleted only by
+their owner.  The <tt>blocks</tt> array lists the disk blocks where this
+file or directory's data is stored.  Entries in the <tt>blocks</tt> array
+that are beyond the end of the file may have arbitrary values.  The inode
+for the root directory <tt>/</tt> is stored in disk block 0.
+
+<p>
+The data for a directory is an array of <tt>fs_direntry</tt> entries (one
+entry per file or sub-directory).  Unused directory entries are identified
+by <tt>inode_block=0</tt>.  In an array of directory entries, entries that
+are used may be interspersed with entries that are unused, e.g., entries 0,
+5, and 15 might be used, with the rest of the entries being unused.  At least
+one entry should be used in each block of directory entries.
+
+<p>
+Each directory entry contains the name of a file or directory (including
+the '\0' that terminates the string) and the disk block number of the disk
+block that stores that file or directory's inode.  A file or directory name
+is a non-empty string of characters (whitespace and <tt>/</tt> characters
+are not allowed).
+
+<p>
+Each disk block may be used by at most one file or directory.
+
+<p>
+Tip: the definitions above serve two purposes.  The first purpose is to
+concisely describe the data format on disk.  E.g., an <tt>fs_direntry</tt>
+consists of <tt>FS_MAXFILENAME+1</tt> bytes for the file name, followed by
+a 4-byte unsigned integer (in little-endian byte order on x86 systems).
+The second purpose is to provide an easy way to convert the raw data you
+read from disk into a data structure, viz. through typecasting.
+
+<h2 id="internals">5. File server internals</h2>
+
+<p>
+This section discusses and guides some design choices you will encounter when
+writing the file server.  Your file server should include the header file
+<a href=fs_server.h><tt>fs_server.h</tt></a>.
+
+<h3 id="arguments">5.1 Arguments and input</h3>
+
+<p>
+Your file server should be able to be called with 0 or 1 command-line
+arguments.  The argument, if present, specifies the port number the file server
+should use to listen for incoming connections from clients.  If there is no
+argument, the file server should have the operating system choose a port.
+
+and your file server could be started as:
+<pre>
+fs 8000
+</pre>
+or
+<pre>
+fs
+</pre>
+
+<h3 id="initialization">5.2 Initialization</h3>
+
+<p>
+When your file server starts, it should carry out the following tasks:
+
+<ul>
+
+<li> Initialize the list of free disk blocks by
+reading the relevant data from the existing file system.  Your file server
+should be able to start with any valid file system (an empty file system as
+well as file systems containing files).
+
+<li>Set up the socket that clients will use to connect to the file server,
+including calling <tt>listen</tt> (<a href="#sockets">Section 8</a>).
+
+</ul>
+
+<strong>After</strong> these initialization steps are done, your file
+server should print the port number of the socket that clients will use to
+connect to the file server (regardless of whether it was specified on the
+command line or chosen by the system).  Here's the statement to use
+(substitute <tt>port_number</tt> with your own variable):
+
+<pre>
+std::cout &lt;&lt; "\n@@@ port " &lt;&lt; port_number &lt;&lt; std::endl;
+</pre>
+
+<h3 id="concurrency">5.3 Concurrency and threads</h3>
+
+<p>
+The workload to your file server may include any number of concurrent
+client requests.  Your file server should create a thread for each request,
+so it can service requests from an arbitrary number of client threads at
+the same time.
+After you create a thread, you should call <tt>std::thread::detach</tt> so
+its resources are freed when the thread finishes.
+The main thread in your
+file server (which is created automatically when your process starts)
+should not exit -- if the main thread exits, the autograder will think the
+file server has exited.
+
+<p>
+One goal of this project is to service concurrent client requests
+whenever it is safe to do so.  A thread that is executing a blocking system
+call (receiving data from the network and reading or writing the disk) to
+service one request should not block another thread, unless required for safety.
+
+<!--
+<p>
+We'll use the Boost library's (version 1.74) implementation of threads
+rather than standard C++ threads, because Boost provides more
+powerful reader/writer locks than the standard C++ library.
+-->
+
+<p>
+Use a lock (<tt>std::mutex</tt>) to protect your in-memory data
+structures.  Use the basic interface for <tt>std::mutex</tt>
+(<tt>lock()</tt>, <tt>unlock()</tt>), or better, use an RAII wrapper
+(construct <tt>std::lock_guard</tt> or <tt>std::unique_lock</tt>).
+
+<p>
+Use locks (<tt>std::mutex</tt>) or reader/writer locks
+(<tt>std::shared_mutex</tt>) to protect disk data.  Each lock or
+reader/writer lock in your program should cover exactly one file or
+directory; you need not (and should not) assign locks on a
+smaller granularity.
+
+<p>
+<strong>Core</strong>:
+<ul>
+<li>The core version of the file server should use locks
+(<tt>std::mutex</tt>) to protect disk data.  Locks allow each file or
+directory to be accessed (read or written) by only one thread at a time.
+For example, <tt>FS_READBLOCK</tt> and <tt>FS_WRITEBLOCK</tt>
+accesses a file, and <tt>FS_CREATE</tt> and <tt>FS_DELETE</tt> accesses the
+directory that holds the file/directory being created/deleted.  Traversing
+the file system requires the server to access each of the directories along
+the path being traversed.
+
+<li>The core version may use reader/writer locks (see below), but this is not
+required.
+</ul>
+
+<p>
+<strong>Advanced</strong>:
+<ul>
+<li>
+The advanced version of the file server must use
+reader/writer locks (<tt>std::shared_mutex</tt>) to protect disk data.  Use
+the low-level interface for <tt>std::shared_mutex</tt> (<tt>lock()</tt>,
+<tt>unlock()</tt>, <tt>lock_shared()</tt>, <tt>unlock_shared()</tt>), or
+better, use an RAII wrapper (construct <tt>std::unique_lock</tt> or
+<tt>std::shared_lock</tt>).
+
+<!--
+<p>
+See
+<a href=https://www.boost.org/doc/libs/1_74_0/doc/html/thread/synchronization.html>
+Boost's documentation</a> for more details.
+-->
+
+<li>
+Think about when a file or directory is read or written, and ensure that a
+file or directory can be written by only one thread at a time, while still
+allowing it to be read by multiple threads (if no thread is writing it).
+For example, <tt>FS_READBLOCK</tt> reads a file, <tt>FS_WRITEBLOCK</tt>
+writes a file, and <tt>FS_CREATE</tt> and <tt>FS_DELETE</tt> write the
+directory that holds the file/directory being created/deleted.  Traversing
+the file system requires the server to read each of the directories along
+the path being traversed.
+<!--
+What file system entity/entities do <tt>FS_CREATE</tt> and
+<tt>FS_DELETE</tt> modify?
+-->
+
+<li> Minimize the space needed for locks.  In particular, your file server
+should not always require more memory for locks as the size of the disk
+grows or the number of files/directories in the file system increases.
+
+<!--
+Think carefully about when to release a lock on a file or directory.
+Releasing a lock too late will unnecessarily limit concurrency, while
+releasing it too early will create race conditions.
+-->
+
+</ul>
+
+<p>
+
+Use <strong>hand-over-hand locking</strong> when traversing a chain of file
+system entities: lock the first entity, access the first entity as needed,
+lock the second entity, then release the lock on the first entity, and so on.
+Think about what race condition is possible if you release the lock on the
+first entity before locking the second entity.
+
+<p>
+When deleting a file or directory, you may need to hold multiple locks.
+Think about what race condition is possible if you only lock the directory
+that holds the file or directory being deleted.
+
+<!--
+<strong>Core/advanced</strong>: The advanced version of the file server
+should use upgradable reader/writer locks to support more concurrent access
+to disk, and it should manage its locks in a space-efficient manner.
+
+<ul>
+<li> The advanced version of the file server should use the
+<strong>upgrade</strong> feature of <tt>boost::shared_mutex</tt>.
+The upgrade feature allows one thread to acquire an upgradable reader lock,
+then later <strong>atomically</strong> upgrade it to a writer lock.  Use
+the low-level upgrade interface for <tt>boost::shared_mutex</tt>
+(<tt>lock_upgrade()</tt>, <tt>unlock_upgrade()</tt>,
+<tt>unlock_upgrade_and_lock()</tt>), or better, use an RAII wrapper
+(construct <tt>boost::upgrade_lock</tt>, then move it to
+<tt>boost::unique_lock</tt>).  The upgrade feature enables more
+concurrency by allowing you to shrink the interval when the file server
+holds a writer lock.  Note: the terminology here is a little confusing--
+"lock_upgrade" and "upgrade_lock" acquires an <strong>upgradable</strong>
+reader lock, not one that is already upgraded.
+
+<li> The advanced version of the file server should minimize the space
+needed for locks.  In particular, it should not always require more
+memory for locks as the size of the disk grows or the number of
+files/directories in the file system increases.
+
+<li> Hint (advanced version): think about the steps involved in
+<tt>FS_DELETE</tt> and what lock(s) must be held at each step to prevent other
+threads from issuing conflicting accesses to the blocks affected by
+<tt>FS_DELETE</tt>.  Then think about how to order those steps to increase
+concurrency.  Watch out for deadlock.
+
+</ul>
+-->
+
+<p>
+Verify that your file server executes requests in parallel if and only if
+it is safe to do so.  First, issue one request and cause the thread
+servicing that request to block indefinitely (e.g., by calling sleep just
+before doing a slow operation).  Then issue a second request that should
+not be serviced concurrently with the first, but do not call sleep on the
+second request.  Verify that the second request blocks on the first
+request.  Do the same test with two requests that should be able to be
+serviced concurrently, and verify that the second thread completes.  As you
+conduct these tests, keep track of what you've tested in a spreadsheet
+(first request; second request; which slow operation you blocked in the first
+request; test case name).  Note that there are many possible pairs of
+requests and there are several slow operations you could block for each
+request, so this should be a long table.
+
+<p>
+The autograder limits the stack size per thread to 1 MB (the default value
+of 10 MB is too large to support highly concurrent workloads).  You can test
+with the same limit by using <tt>ulimit</tt> command in bash.
+
+<!--
+The core version of the file server need only handle deletion of files and
+empty directories; if a client requests to delete a non-empty directory,
+the core version of the file server may treat the request as erroneous.
+The advanced version of the file server must handle deletion of
+non-empty directories.
+-->
+
+<h3 id="caching">5.4 Performance and caching</h3>
+
+<p>
+Your file server should receive network data efficiently and should
+minimize the number of disk I/Os used to carry out requests.  Most file
+servers cache disk information in memory aggressively to reduce disk I/Os.
+However, to simplify the project, your file server should
+<strong>not</strong> cache information between requests, and all work for a
+request should be done <strong>before</strong> responding to the client.
+The only information about disk state that your file server should cache in
+memory between requests is the list of free disk blocks.
+<!--
+Your file server should <strong>not</strong> cache inodes or data blocks
+between requests,
+-->
+
+<h3 id="directoryentries">5.5 Managing and reading directory entries</h3>
+
+<p>
+Directory data consists of an array of <tt>fs_direntry</tt> entries and is
+stored in an array of disk blocks.   The size of a directory is always an
+integer number of blocks, so many directories will have unused directory
+entries (identified by <tt>inode_block=0</tt>).
+
+<p>
+When <tt>FS_CREATE</tt> allocates a directory entry, it should choose the
+lowest-numbered directory entry that is unused.
+
+<p>
+When <tt>FS_DELETE</tt> deletes a file, the directory entry for that file
+is marked unused.  Usually, <tt>FS_DELETE</tt> should not move directory
+entries around to compact the directory data; it should simply leave
+existing entries in place.  The exception to this is when an
+<tt>FS_DELETE</tt> leaves <em>all</em> directory entries in a disk block
+unused.  In this case, <tt>FS_DELETE</tt> should shrink the directory by an
+entire disk block by updating the directory inode.  To do so,
+<tt>FS_DELETE</tt> should remove the unused block from the directory
+inode's <tt>blocks</tt> array then shift all the following values in the 
+<tt>blocks</tt> array up by one.
+
+<p>
+The file server will need to read directory data to carry out most client
+requests.  It should read directory data in the order of the <tt>blocks</tt>
+array in the directory inode.
+
+<h3 id="order">5.6 File system consistency and order of disk writes</h3>
+
+<p>
+Your file server must maintain a consistent file system on disk, regardless
+of when the system might crash.  This implies a specific ordering of disk
+writes for file system operations that involve multiple disk writes.  The
+general rule for file systems is that meta-data (e.g., directory or inode)
+should never point to anything invalid (e.g., invalid inode block or data
+block).  Thus, when writing a block of data and a block containing a
+pointer to the data block, one should write the block being pointed to
+before writing the block containing the pointer.
+
+<p>
+E.g., for <tt>FS_CREATE</tt>, the file server should write the new inode to
+disk before writing the directory block (which points to that inode).  If
+the file server mistakenly wrote out the directory block before the inode
+block, a crash in between these two writes would leave the directory
+pointing at a garbage inode block.  In the same way, you should reason
+through the order of disk writes for <tt>FS_WRITEBLOCK</tt> and
+<tt>FS_DELETE</tt> so that the file system remains consistent regardless of
+when a crash occurs.
+
+<h3 id="order">5.7 Parsing</h3>
+
+<p>
+Parsing untrusted input can be tricky.  Here are some suggestions for how
+to do this more easily.
+
+<p>
+Use the C++ facilities meant for parsing strings; do not recreate these
+facilities.  The format of (correct) network requests is amenable for
+processing by istringstream (e.g., operator>>).  You may also use regular
+expressions (more powerful than needed for this project, but useful to
+learn).
+
+<p>
+Since client input is untrusted, parsing requests via istringstream (or any
+other method) might fail.  If your parsing is correct for correct requests,
+then any parsing failures indicate an incorrect request.  To catch many
+errors during parsing, consider how you might make use of the fact that
+there is only one correct string for any particular request.
+
+<p>
+Finally, remember that your parsing functionality must be safe.  It's ok
+for istringstream to fail, but it's not ok for your file server to fail.
+
+<h2 id="utility">6. Utility functions and utility programs</h2>
+
+<p>
+Your file server must use the utility functions <tt>disk_readblock</tt>,
+and <tt>disk_writeblock</tt> to access the disk.  These functions are
+declared in <a href=fs_server.h><tt>fs_server.h</tt></a> and are included
+in <a href=libfs_server.o><tt>libfs_server.o</tt></a>.  Use the
+standard functions <tt>send</tt>, and <tt>close</tt> to send network
+messages and close network sockets.
+
+<p>
+Use <tt>disk_readblock</tt> and <tt>disk_writeblock</tt> to read and write
+a disk block.  You may assume these functions are atomic with respect to
+crashes (but not necessarily with respect to each other; use locking to
+avoid conflicts).  Minimize the number of disk I/Os.  These
+functions access the disk data stored in the Linux file
+<tt>/tmp/fs_tmp.&lt;uniqname&gt;.disk</tt>, where <tt>&lt;uniqname&gt;</tt>
+is the login ID of the person running the file server.
+
+<p>
+You can run the utility program <a href=showfs><tt>showfs</tt></a> to show
+the current file system contents stored in the simulated disk (which is
+stored in the host file <tt>/tmp/fs_tmp.&lt;uniqname&gt;.disk</tt>).
+Remember to set the execute permission bit on <a
+href=showfs><tt>showfs</tt></a> (e.g., run "<tt>chmod +x showfs</tt>").
+
+<p>
+You can initialize a file system in the simulated disk by running the
+utility program <a href=createfs><tt>createfs</tt></a>.  Remember to set
+the execute permission bit on <a href=createfs><tt>createfs</tt></a> (e.g.,
+run "<tt>chmod +x createfs</tt>").  To create an empty file system, run <a
+href=createfs><tt>createfs</tt></a> without any arguments.  To create a
+non-empty file system, run "<tt> <a href=createfs>createfs</a>
+image.fs</tt>", where <tt>image.fs</tt> contains the output (or
+edited output) generated by <a href=showfs><tt>showfs</tt></a>.
+
+<p>
+Use <tt>send</tt> and <tt>recv</tt> to send and receive network messages.
+Remember that the <tt>len</tt> parameter to <tt>send</tt> and <tt>recv</tt>
+specifies the <em>maximum</em> amount of data to send or receive; these
+functions may send or receive less than this.
+<!--
+Each response to a client request must be made using exactly two
+calls to <tt>send</tt>: the first call to <tt>send</tt> should send
+the cleartext response header; the second call to <tt>send</tt> should
+send the response itself (this second message includes the
+<tt>&lt;data&gt;</tt> part of an <tt>FS_READBLOCK</tt> response).
+-->
+Your file
+server should send a response back to the client only after all processing
+for that request is finished.
+
+<p>
+Use <tt>close</tt> to close network sockets.
+
+<!--
+<p>
+You may set the variable <tt>disk_quiet</tt> to <tt>false</tt> to turn off
+debugging output for <tt>disk_readblock</tt> and <tt>disk_writeblock</tt>,
+and you may set the variable <tt>fs_quiet</tt> to <tt>false</tt> to turn
+off debugging for <tt>send</tt> and <tt>close</tt>.
+-->
+
+<h2 id="output">7. Output</h2>
+
+<p>
+Your file server must produce the output mentioned in
+<a href="#initialization">Section 5.2</a>.  The infrastructure will also
+<!--
+(if <tt>fs_quiet</tt> and <tt>disk_quiet</tt> are <tt>true</tt>)
+-->
+produce output for calls to <tt>disk_readblock</tt>,
+<tt>disk_writeblock</tt>, <tt>send</tt>, and <tt>close</tt>.  In addition,
+your file server may produce any output you need for debugging, as long as
+that output does not contain lines that start with <tt>@@@</tt>.
+
+<p>
+Because your file server is multi-threaded, you must be careful to prevent
+output from different threads from being interleaved.  To prevent garbled
+output, your file server must declare: 
+<pre>
+extern std::mutex cout_lock;
+</pre>
+and protect each call to <tt>std::cout</tt> using the <tt>cout_lock</tt> mutex
+(this mutex is also used by <a href=libfs_server.o><tt>libfs_server.o</tt></a>
+when it produces output).
+
+<!--
+This mutex is
+declared in <a href=fs_server.h><tt>fs_server.h</tt></a> and is used when
+<a href=libfs_server.o><tt>libfs_server.o</tt></a> produces output,
+so you also need to use it whenever your file server generates output.
+-->
+
+<h2 id="sockets">8. Sockets and TCP</h2>
+
+<p>
+A significant part of this project is learning how to use Berkeley sockets,
+which is a common programming interface used in network programming.
+Unfortunately, the socket interface is rather complicated.  This section
+contains a little help for using sockets, but we expect you to get many
+necessary details by reading the relevant manual pages.  Start with the
+<tt>tcp</tt> manual page.  The class web page also contains a tutorial on
+how to use sockets and TCP.
+
+<p>
+Start by using the <tt>socket</tt> function to creating a socket, which is
+an endpoint for communication.  The <tt>tcp</tt> manual page tells you how
+to create a socket for TCP.  It's usually a good idea (though not strictly
+necessary) to configure the socket to allow it to reuse local addresses.
+Use <tt>setsockopt</tt> with level SOL_SOCKET and optname SO_REUSEADDR to
+configure the socket.  This avoids the annoying <tt>bind: address already
+in use</tt> error that you would otherwise get when you kill the file
+server and restart it with the same port number.
+
+<p>
+After creating the socket, the next step is to assign a port number to the
+socket.  This port number is what a client will use to connect to the file
+server.  Use <tt>bind</tt> to assign a port number to a socket.  Here's how to
+initialize the parameter passed to <tt>bind</tt>:
+
+<hr>
+<pre>
+#include &lt;cstring&gt;
+struct sockaddr_in addr;
+
+memset(&addr, 0, sizeof(addr));
+addr.sin_family = AF_INET;
+addr.sin_addr.s_addr = htonl(INADDR_ANY);
+addr.sin_port = htons(port_number);
+
+bind(sock, (struct sockaddr*) &addr, sizeof(addr));
+</pre>
+<hr>
+
+<p>
+See the <tt>ip(7)</tt> manual page for an explanation of INADDR_ANY.
+<tt>htonl</tt> and <tt>htons</tt> are used to convert host integers and
+shorts into network format (network byte order) for use by <tt>bind</tt>.
+If <tt>port_number</tt> is 0 in the above code, <tt>bind</tt> will have the
+system select a port.
+
+<p>
+Use <tt>getsockname</tt> to get the port number assigned by the system.
+Use <tt>ntohs</tt> to convert from the network byte order returned by
+<tt>bind</tt> to a host number.
+
+<p>
+After binding, use <tt>listen</tt> to configure the socket to allow a queue
+of pending connection requests.  A queue length of 30 is sufficient.
+
+<p>
+Use <tt>accept</tt> to accept a connection on the socket.  <tt>accept</tt>
+creates a new socket that can be used for two-way communication between the
+two parties.  A client process will use <tt>connect</tt> to initiate a
+connection to the file server.
+
+<p>
+Use <tt>recv</tt> to receive a network message, and <tt>send</tt>
+to send a network message.
+
+<p>
+Clients may shut down the connection before the file server has sent
+the response.  Sending to a connection that is shut down generates a
+<tt>SIGPIPE</tt> signal, which would terminate the file server.  To avoid
+this, use the <tt>MSG_NOSIGNAL</tt> flag when calling <tt>send</tt>.
+
+<p>
+Don't forget to close the socket (using <tt>close</tt>) after you're
+done servicing the request, otherwise you'll quickly run out of free file
+descriptors.
+
+<!--
+<p>
+If you use the <tt>MSG_PEEK</tt> flag in <tt>recv</tt>, make sure you don't
+leave unreceived bytes in the message buffer.  If you close the socket with
+data in the receive buffer, the socket sends a TCP RST to the client
+instead of the usual closing protocol.  If the client gets the RST after
+reading all the data we sent it, everything is fine. If the client gets the
+RST before it's finished reading, recv() returns with the Connection reset
+by peer.
+-->
+
+<h2 id="testcases">9. Test cases</h2>
+
+<p>
+An integral (and graded) part of writing your file server will be to write a
+suite of test cases to validate any file server.  This is common practice in
+the real world--software companies maintain a suite of test cases for their
+programs and use this suite to check the program's correctness after a change.
+Writing a comprehensive suite of test cases will deepen your understanding of
+file systems, and it will help you a lot as you debug your file server.  To
+construct a good test suite, think about what different things might happen
+on each type of request (e.g., what effect different blocks might
+have on the disk I/Os needed to satisfy a request).
+
+<p>
+Each test case for the file server will be a short C++ client program that
+uses a file server via the interface described in <a
+href="#interface">Section 2</a> (e.g., the example program in <a
+href="#interface">Section 2</a>).  The name of each client program should
+start with <tt>test</tt> and end with <tt>.cc</tt> or <tt>.cpp</tt>, e.g.,
+<tt>test1.cpp</tt>.
+
+<p>
+Each client program you submit may be accompanied by an optional file system
+image with the same base name; e.g., client program <tt>test1.cpp</tt> may
+be accompanied by file system image <tt>test1.fs</tt>.  Client programs
+that are accompanied by a <tt>.fs</tt> file will be run on a file system
+initialized with that file system image; i.e., the autograder will run <a
+href=createfs><tt>createfs</tt></a> on that image before starting the file
+server).  Client programs that are not accompanied by a <tt>.fs</tt> file
+will be run on an empty file system.
+
+<p>
+The format of a <tt>.fs</tt> file matches the output from <a
+href=showfs><tt>showfs</tt></a>, and can also be used as input to <a
+href=createfs><tt>createfs</tt></a>.
+<!--
+You may edit a <tt>.fs</tt> file
+to tailor the file system image for what you want to test.
+-->
+
+<p>
+Each test case should be run with exactly two arguments:
+
+<ol>
+<li>the hostname that is running the file server
+<li>the port that the file server is listening on for client connections
+</ol>
+
+Test cases should use no other input, and should exit(0) when run with a
+correct file server.
+
+<p>
+When we run your test cases, we will start the file server with the file
+system image you specify.  Test cases without accompanying file system
+images will be started with an empty file system.
+
+<p>
+Your test suite may contain up to 20 test cases.  Each test case may cause
+a correct file server to generate at most 6000 lines of <tt>@@@</tt> output
+and take less than 60 seconds to run.  These limits are larger than needed
+to expose all buggy file servers (however, you will probably need to run
+larger test cases on your own to test your file server).  You will submit your
+suite of test cases together with your file server, and we will grade your
+test suite according to how thoroughly it exercises a file server.  See
+<a href="#grading">Section 11</a> for how your test suite will be graded.
+
+<p>
+You should test your file server with both serial and concurrent client
+requests.  However, your submitted test suite need only be a single process
+issuing a single request at a time; none of the buggy file servers used to
+evaluate your test suite require multiple concurrent requests to be exposed.
+
+<h2 id="logistics">10. Project logistics</h2>
+
+<p>
+Write your file server in C++17 on Linux.  Use <tt>g++ 9.1.0</tt> (with
+-std=c++17) to compile your programs.  To use g++ 9.1.0
+<!--
+and Boost 1.74
+-->
+on
+CAEN computers, put the following command in your startup file (e.g.,
+<tt>~/.profile</tt>):
+
+<pre>
+module load gcc/9.1.0
+</pre>
+
+<!--
+module load boost/1.74.0
+-->
+
+<p>
+You may use any part of the standard C++ library, including the C++ thread
+facilities.
+<!--
+(use Boost threads instead)
+-->
+You should not use any libraries
+other than the standard C++ library.
+<!--
+and Boost threads
+-->
+Your file server
+code may be in multiple files.  Each file name must end with <tt>.cc</tt>,
+<tt>.cpp</tt>, or <tt>.h</tt> and must not start with <tt>test</tt>.
+
+<!--
+<p>
+To use Boost threads, <tt>#include &lt;boost/thread.hpp&gt;</tt> and compile
+with "<tt>-lboost_thread -lboost_system -pthread</tt>".
+
+<p>
+If you are running on your own computer, you may need to set a few
+environment variables to include the location of your Boost installation
+before you compile and run your file server.  E.g.:
+
+<pre>
+export CPLUS_INCLUDE_PATH=/usr/local/boost/include:$CPLUS_INCLUDE_PATH
+export LIBRARY_PATH=/usr/local/boost/lib:$LIBRARY_PATH
+export LD_LIBRARY_PATH=/usr/local/boost/lib:$LD_LIBRARY_PATH
+</pre>
+
+<p>
+FYI, <tt>CPLUS_INCLUDE_PATH</tt> tells <tt>g++</tt> where to look for
+<tt>#include</tt> files; <tt>LIBRARY_PATH</tt> tells <tt>g++</tt> where to look
+for libraries (e.g., <tt>boost_thread</tt> and <tt>boost_system</tt>); and
+<tt>LD_LIBRARY_PATH</tt> tells the linker where to look for shared
+libraries when you run your file server.
+
+<p>
+If you have trouble compiling, you can also manually specify the path
+to your Boost installation via compiler flags, e.g.:
+<tt>-I/usr/local/boost -L/usr/local/boost/lib</tt>.  However, you still
+need to set your <tt>LD_LIBRARY_PATH</tt> environment variable to tell
+the loader where to find the Boost libraries.
+-->
+
+<p>
+This <a href=Makefile>Makefile</a> shows how to compile a file server and
+an application that uses the file server (adjust the file names in the
+Makefile to match your own program).
+<!--
+, and adjust the location of Boost to
+match your own setup).
+-->
+
+<p>
+You are required to document your development process by having your
+Makefile run <tt><a href=autotag.sh>autotag.sh</a></tt> each time it
+compiles your file server (see Makefile above).  <tt><a
+href=autotag.sh>autotag.sh</a></tt> creates a git tag for a compilation,
+which helps the instructors better understand your development process.
+<tt><a href=autotag.sh>autotag.sh</a></tt> also configures your local git
+repo to include these tags when you run "<tt>git push</tt>".  To use it,
+download <tt><a href=autotag.sh>autotag.sh</a></tt> and set its execute
+permission bit (run "<tt>chmod +x autotag.sh</tt>").  If you have several
+local git repos, be sure to push to github from the same repo in which you
+compiled your file server.
+
+<p>
+We have created a private <a href="https://github.com/eecs482">github</a>
+repository for your group (<tt>eecs482/&ltgroup&gt.4</tt>), where
+<tt>&ltgroup&gt</tt> is the sorted, dot-separated list of your group members'
+uniqnames.  Initialize your local repository by cloning the (empty)
+repository from github, e.g.,
+
+<pre>
+git clone git@github.com:eecs482/uniqnameA.uniqnameB.4
+</pre>
+
+<h2 id="grading">11. Grading, auto-grading and formatting</h2>
+
+<p>
+To help you validate your programs, your submissions will be graded
+automatically, and the results will be provided to you.  You may then
+continue to work on the project and re-submit.  The results from the
+autograder will not be very illuminating; they won't tell you where your
+problem is or give you the test programs.  The main purpose of the
+autograder is to help you know to keep working on your project (rather
+than thinking it's perfect and ending up with a 0).  The best way to debug
+your program is to generate your own test cases, figure out the correct
+answers, and compare your program's output to the correct answers.  This is
+also one of the best ways to learn the concepts in the project.
+
+<p>
+Here is a (very rough) categorization of some of the test cases used by
+the autograder.  Some test cases are too special-purpose to categorize;
+others appear in multiple categories.
+
+<ul>
+<li>0-10,25-27: basic functionality
+<li>11-17,26,63,65-67: error handling
+<li>18-23: large, serial (i.e., non-concurrent) test cases
+<li>26-58: start with pre-existing file systems
+<li>24,28-67: concurrent test cases
+</ul>
+
+<p>
+The student suite of test cases will be graded according to how thoroughly
+they test a file server.  We will judge thoroughness of the test suite by
+how well it exposes potential bugs in a file server.  The autograder will
+first run a test case with a correct file server to generate the right
+answers for this test case.  The autograder will then run the test case
+with a set of buggy file servers.  A test case exposes a buggy file server
+by causing the buggy file server to generate output (on <tt>stdout</tt>)
+that differs from correct file server's output or by causing the buggy file
+server to generate a file system image on disk (i.e., output from <a
+href=showfs><tt>showfs</tt></a>) that differs from that generated by a
+correct file server.  The test suite is graded based on how many of the
+buggy file servers were exposed by at least one test case.  This is known
+as <em>mutation testing</em> in the research literature on automated
+testing.
+
+<p>
+You may submit your program as many times as you like, and all submissions
+will be graded and cataloged.  We will use your highest-scoring submission,
+with ties broken in favor of the later submission.  If any group member
+is in EECS 498-002, your highest-scoring submission will be chosen using a
+(2/3,1/3) weighted average of your core and advanced scores.
+
+<p>
+You must recompile and <tt>git push</tt> at least once between submissions.
+
+<p> 
+The autograder will provide feedback for the first submission of each day,
+plus 3 bonus submissions over the duration of this project.  Bonus
+submissions will be used automatically--any submission you make after the
+first one of that day will use one of your bonus submissions.  After your 3
+bonus submissions are used up, the system will continue to provide feedback
+for the first submission of each day.  See the <a
+href=../faq.html#limit>FAQ</a> for why we use this policy.
+
+<p>
+Because your programs will be auto-graded, you must be careful to follow the
+exact rules in the project description:
+
+<ul>
+
+<li>Your code must not print any output lines that start with
+<tt>@@@</tt>, except for the output specified in <a
+href="#initialization">Section 5.2</a>.
+
+<li>Do not modify the header files provided in this handout.
+
+<li>Your file server must use <tt>disk_readblock</tt> and
+<tt>disk_writeblock</tt> to write the disk, <tt>send</tt> to send
+messages, and <tt>close</tt> to close a network socket.
+<!--
+Remember to
+send each response via two calls to <tt>send</tt>: one to send the
+cleartext response header, the second to send the response itself.
+-->
+
+<li>The file server should send a response back only after all processing
+for that request is finished.
+
+<li>When <tt>FS_CREATE</tt> allocates a directory entry, it should choose
+the lowest-numbered free directory entry.
+
+<li>When <tt>FS_DELETE</tt> frees a directory entry, it should leave other
+entries in place, except when it can shrink the directory by an entire disk
+block by updating only the directory inode (in which case it should remove
+the unused block from the directory inode's blocks array, then shift all
+the following values in the blocks array up by one).
+
+<li>Your file server should read directory data in the order of the
+blocks array in the directory's inode.
+
+</ul>
+
+<p>
+In addition to the autograder's evaluation of your program's correctness,
+a human grader will evaluate your program on issues such as documentation,
+coding style, the efficiency, brevity, and understandability of your code,
+compile warnings, etc..  Your documentation should explain the
+synchronization scheme followed by your file server.  Your final score for
+each project part will be the product of the hand-graded score (between
+1-1.04) and the autograder score.
+
+<h2 id="submission">12. Turning in the project</h2>
+
+<p>
+<a href=../submit.php?4>Submit</a>
+the following files for your file server:
+
+<ul>
+<li>C++ files for your file server.  File names should end in <tt>.cc</tt>,
+<tt>.cpp</tt>, or <tt>.h</tt> and must not start with <tt>test</tt>.  Do
+not submit the files provided in this handout.
+
+<li>Suite of test cases.  Each test case should be in a single file.  File
+names should start with <tt>test</tt> and end with <tt>.cc</tt> or
+<tt>.cpp</tt>.
+
+</ul>
+
+Each person should also describe the contributions of each team member
+using the following <a href="../peer.php?peer4">web form</a>.
+
+<p>
+The official time of submission for your project will be the time of your
+last submission. Submissions after the due date will automatically use up
+your late days; if you have no late days left, late submissions will not
+be counted for you (though they may still count for other members of your
+group, if they have more late days available).
+
+<h2 id="files">13. Files included in this handout (<a href=handout.zip>zip file</a>) </h2>
+
+<ul>
+<li><tt><a href=createfs>createfs</a></tt>
+<li><tt><a href=fs_client.h>fs_client.h</a></tt>
+<li><tt><a href=fs_param.h>fs_param.h</a></tt>
+<li><tt><a href=fs_server.h>fs_server.h</a></tt>
+<li><tt><a href=libfs_client.o>libfs_client.o</a></tt>
+<li><tt><a href=libfs_server.o>libfs_server.o</a></tt>
+<li><tt><a href=showfs>showfs</a></tt>
+<li><tt><a href=autotag.sh>autotag.sh</a></tt>
+<li><tt><a href=Makefile>Makefile</a></tt>
+</ul>
+
+<h2 id="platforms">14. Experimental platforms</h2>
+
+<p>
+The files provided in this handout were compiled on RHEL 7.  They should
+work on most other Linux distributions (e.g., Ubuntu) and on Windows
+Subsystem for Linux (WSL), but these are not officially supported.
+
+<p>
+We also provide an experimental, unsupported version of the infrastructure
+for students who want to develop on MacOS.  If you are developing on MacOS:
+
+<ul>
+
+<li> Use <tt><a href="macos/libfs_client_macos.o">libfs_client_macos.o</a></tt>
+instead of <tt><a href="libfs_client.o">libfs_client.o</a></tt>.
+
+<li> Use <tt><a href="macos/libfs_server_macos.o">libfs_server_macos.o</a></tt>
+instead of <tt><a href="libfs_server.o">libfs_server.o</a></tt>.
+
+<li> Use <tt><a href="macos/createfs_macos">createfs_macos</a></tt> instead of
+<tt><a href="createfs">createfs</a></tt>.
+
+<li> Use <tt><a href="macos/showfs_macos">showfs_macos</a></tt> instead of <tt><a
+href="showfs">showfs</a></tt>.
+
+<li> Add <tt>-D_XOPEN_SOURCE</tt> to the compilation flags.
+
+</ul>
+
+<script src="../assets/js/primer_spec_plugin.min.js"></script>
+</body>
+</html>
